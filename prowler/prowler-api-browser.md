@@ -4,7 +4,7 @@ Access the API using browser
 const PROWLER_API_KEY = 'YOUR_API_KEY_HERE';
 const PROWLER_URL = 'YOUR_URL_HERE';
 
-fetch('https://${PROWLER_URL}/api/v1/tenants', {
+fetch(`https://${PROWLER_URL}/api/v1/tenants`, {
   method: 'GET',
   headers: {
     'Authorization': `Api-Key ${PROWLER_API_KEY}`,
