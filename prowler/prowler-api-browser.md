@@ -1,9 +1,12 @@
-Access the API using browser
-
+Define Variables
 ```
 const PROWLER_API_KEY = 'YOUR_API_KEY_HERE';
 const PROWLER_URL = 'YOUR_URL_HERE';
+```
 
+Access the API using browser
+
+```
 fetch(`https://${PROWLER_URL}/api/v1/tenants`, {
   method: 'GET',
   headers: {
