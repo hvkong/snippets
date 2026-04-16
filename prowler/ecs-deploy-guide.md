@@ -192,6 +192,7 @@ Go to **VPC → Security Groups → Create security group**. Create four in your
 - Name: `prowler-efs-sg`
 - Inbound rules:
   - NFS (2049) from `prowler-data-sg`
+  - NFS (2049) from `prowler-app-sg` (needed for shared output volume on API and Worker)
 
 All security groups: leave outbound as default (all traffic).
 
@@ -227,6 +228,13 @@ Create two access points after the file system is created:
 - Root directory creation permissions: Owner UID `7474`, GID `7474`, Permissions `0755`
 
 Note the file system ID and both access point IDs.
+
+**Output access point (shared between API and Worker for scan reports):**
+- Root directory path: `/prowler-output`
+- POSIX user: UID `1000`, GID `1000` (the `prowler` user in the container)
+- Root directory creation permissions: Owner UID `1000`, GID `1000`, Permissions `0755`
+
+Note the file system ID and all three access point IDs.
 
 Do not enable any EFS policy settings (prevent root access, read-only, etc.) They
 interfere with how the containers initialize their data directories.
@@ -285,14 +293,54 @@ Create a task role if you need ECS Exec or S3 output:
 
 ---
 
-## Step 6: Build and Push Custom UI Image
+## Step 6: Generate JWT Signing Keys
 
-### 6.1 — Create ECR Repository
+The API uses RSA keys to sign and verify JWT tokens. By default, the API auto-generates
+keys on first boot and stores them on the container's ephemeral filesystem. In Fargate,
+this means every API restart generates new keys, invalidating all existing user sessions
+and causing 401 errors across the system (including Lighthouse AI).
+
+Generate a static key pair and configure it on the API, Worker, and Worker-Beat task
+definitions so tokens survive restarts.
+
+### 6.1 — Generate RSA Key Pair
+```bash
+openssl genrsa -out private.pem 2048
+openssl rsa -in private.pem -pubout -out public.pem
+```
+
+### 6.2 — Convert to Single-Line Format
+ECS environment variables don't support multi-line values. Convert newlines to literal
+`\n` escape sequences:
+```bash
+awk 'NF {sub(/\r/, ""); printf "%s\\n",$0;}' private.pem
+awk 'NF {sub(/\r/, ""); printf "%s\\n",$0;}' public.pem
+```
+
+Each command outputs a single line. The Django code has `.replace("\\n", "\n")` which
+converts the literal `\n` strings back to real newlines at runtime.
+
+> Important: When entering these values in the ECS console JSON editor, ensure the `\n`
+> sequences are preserved as literal characters in the string value, not converted to
+> spaces. Verify by checking the JSON shows `\\n` between PEM lines.
+
+### 6.3 — Set on Task Definitions
+Add these environment variables to API, Worker, and Worker-Beat task definitions:
+- `DJANGO_TOKEN_SIGNING_KEY` = the single-line private key output
+- `DJANGO_TOKEN_VERIFYING_KEY` = the single-line public key output
+
+All three must have identical values. Delete the local PEM files after configuring.
+
+---
+
+## Step 7: Build and Push Custom UI Image
+
+### 7.1 — Create ECR Repository
 Go to **ECR → Create repository**:
 - Visibility: Private
 - Name: `prowler-ui` (or your preferred name)
 
-### 6.2 — Build the Image
+### 7.2 — Build the Image
 From the root of the Prowler repo:
 ```bash
 docker build --target prod \
@@ -306,7 +354,7 @@ docker build --target prod \
 The `NEXT_PUBLIC_API_BASE_URL` must match the Service Connect discovery name you'll use
 for the API service (`prowler-api`) plus the namespace suffix (`.prowler`).
 
-### 6.3 — Push to ECR
+### 7.3 — Push to ECR
 ```bash
 aws ecr get-login-password --region <REGION> | docker login --username AWS --password-stdin <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com
 
@@ -315,7 +363,7 @@ docker push <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/<REPO_NAME>:stable
 
 ---
 
-## Step 7: Task Definitions
+## Step 8: Task Definitions
 
 Common settings for all task definitions:
 - Launch type: AWS Fargate
@@ -323,7 +371,7 @@ Common settings for all task definitions:
 - Task execution role: your execution role
 - Network mode: awsvpc
 
-### 7.1 — Postgres
+### 8.1 — Postgres
 - CPU: 0.5 vCPU, Memory: 1 GB (or larger)
 - Container name: `postgres`
 - Image: `postgres:16.3-alpine3.20`
@@ -337,7 +385,7 @@ Common settings for all task definitions:
 - Volume: EFS, your file system ID, postgres access point, transit encryption enabled
   - Mount: `/var/lib/postgresql/data`
 
-### 7.2 — Valkey
+### 8.2 — Valkey
 - CPU: 0.25 vCPU, Memory: 0.5 GB
 - Container name: `valkey`
 - Image: `valkey/valkey:7-alpine3.19`
@@ -346,7 +394,7 @@ Common settings for all task definitions:
   - Interval: 10, Timeout: 5, Retries: 3, Start period: 10
 - No volumes
 
-### 7.3 — Neo4j
+### 8.3 — Neo4j
 - CPU: 1 vCPU, Memory: 3 GB
 - Container name: `neo4j`
 - Image: `graphstack/dozerdb:5.26.3.0`
@@ -368,7 +416,7 @@ Common settings for all task definitions:
   - Mount: `/data`
 
 
-### 7.4 — API
+### 8.4 — API
 - CPU: 0.5 vCPU, Memory: 1 GB (or larger)
 - Container name: `api`
 - Image: `prowlercloud/prowler-api:stable`
@@ -385,9 +433,9 @@ Common settings for all task definitions:
   - `DJANGO_WORKERS` = `2`
   - `DJANGO_MANAGE_DB_PARTITIONS` = `True`
   - `DJANGO_SECRETS_ENCRYPTION_KEY` = `<generate: openssl rand -base64 32>`
-  - `DJANGO_TOKEN_SIGNING_KEY` = (empty — auto-generated on first boot)
-  - `DJANGO_TOKEN_VERIFYING_KEY` = (empty)
-  - `DJANGO_ACCESS_TOKEN_LIFETIME` = `30`
+  - `DJANGO_TOKEN_SIGNING_KEY` = `<single-line private key from Step 6>`
+  - `DJANGO_TOKEN_VERIFYING_KEY` = `<single-line public key from Step 6>`
+  - `DJANGO_ACCESS_TOKEN_LIFETIME` = `180`
   - `DJANGO_REFRESH_TOKEN_LIFETIME` = `1440`
   - `DJANGO_CACHE_MAX_AGE` = `3600`
   - `DJANGO_STALE_WHILE_REVALIDATE` = `60`
@@ -408,6 +456,8 @@ Common settings for all task definitions:
   - `NEO4J_PORT` = `7687`
   - `NEO4J_USER` = `neo4j`
   - `NEO4J_PASSWORD` = `<your-neo4j-password>`
+- Volume: EFS, your file system ID, prowler-output access point, transit encryption enabled
+  - Mount: `/tmp/prowler_api_output`
 - Health check: `CMD-SHELL,wget --no-verbose --spider http://localhost:8080/api/v1/docs || exit 1`
   - Interval: 15, Timeout: 5, Retries: 5, Start period: 120
 
@@ -415,30 +465,40 @@ Common settings for all task definitions:
 > private IP as the Host header, which changes on every task restart. The ALB and security
 > groups provide the perimeter security. `DJANGO_CORS_ALLOWED_ORIGINS` (locked to your domain)
 > prevents cross-origin browser abuse.
+>
+> `DJANGO_ACCESS_TOKEN_LIFETIME=180` (3 hours) ensures tokens don't expire during long scan
+> pipelines. The worker processes tasks using the user's JWT token, and a full scan with
+> output generation and integrations can take 30-60+ minutes.
 
-### 7.5 — Worker
+### 8.5 — Worker
 - CPU: 1 vCPU, Memory: 2 GB
 - Container name: `worker`
 - Image: `prowlercloud/prowler-api:stable`
 - No port mappings
 - Entry point (JSON): `["/home/prowler/docker-entrypoint.sh", "worker"]`
-- Environment variables: **same as API**
+- Environment variables: **same as API** (including JWT keys and token lifetime)
 - Ulimits (JSON): `[{"name": "nofile", "softLimit": 65536, "hardLimit": 65536}]`
+- Volume: EFS, your file system ID, prowler-output access point, transit encryption enabled
+  - Mount: `/tmp/prowler_api_output`
 - No health check
 
-### 7.6 — Worker-Beat
+> The shared EFS volume at `/tmp/prowler_api_output` is critical. The worker writes scan
+> reports and output files here, and the API reads from the same path to serve downloads.
+> Without this shared mount, report downloads will fail.
+
+### 8.6 — Worker-Beat
 - CPU: 0.25 vCPU, Memory: 0.5 GB
 - Container name: `worker-beat`
 - Image: `prowlercloud/prowler-api:stable`
 - No port mappings
 - Entry point (JSON): `["../docker-entrypoint.sh", "beat"]`
-- Environment variables: **same as API**
+- Environment variables: **same as API** (including JWT keys and token lifetime)
 - Ulimits: same as Worker
 - No health check
 
 > Never run more than 1 beat instance. Always set desired count to exactly 1.
 
-### 7.7 — MCP Server
+### 8.7 — MCP Server
 - CPU: 0.25 vCPU, Memory: 0.5 GB
 - Container name: `mcp-server`
 - Image: `prowlercloud/prowler-mcp:stable`
@@ -446,10 +506,15 @@ Common settings for all task definitions:
 - Command (JSON, not entry point): `["uvicorn", "--host", "0.0.0.0", "--port", "8000"]`
 - Environment variables:
   - `PROWLER_MCP_TRANSPORT_MODE` = `http`
+  - `API_BASE_URL` = `http://prowler-api.prowler:8080/api/v1`
 - Health check: `CMD-SHELL,wget -q -O /dev/null http://127.0.0.1:8000/health || exit 1`
   - Interval: 10, Timeout: 5, Retries: 3, Start period: 15
 
-### 7.8 — UI
+> `API_BASE_URL` is required for Lighthouse AI `prowler_app_*` tools to work. Without it,
+> the MCP server defaults to `https://api.prowler.com/api/v1` (the Prowler SaaS endpoint)
+> and all app tool calls will fail.
+
+### 8.8 — UI
 - CPU: 0.25 vCPU, Memory: 0.5 GB (or larger)
 - Container name: `ui`
 - Image: `<ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/<REPO_NAME>:stable` (your custom ECR image)
@@ -472,9 +537,9 @@ Common settings for all task definitions:
 
 ---
 
-## Step 8: Application Load Balancer
+## Step 9: Application Load Balancer
 
-### 8.1 — Create ALB
+### 9.1 — Create ALB
 Go to **EC2 → Load Balancers → Create → Application Load Balancer**.
 - Name: `prowler-alb`
 - Scheme: Internet-facing
@@ -482,7 +547,7 @@ Go to **EC2 → Load Balancers → Create → Application Load Balancer**.
 - Security group: `prowler-alb-sg`
 - Listener: HTTP:80 (add HTTPS:443 later with ACM certificate)
 
-### 8.2 — Create Target Groups
+### 9.2 — Create Target Groups
 Create three target groups (Target type: IP, VPC: default, do not register targets):
 
 | Target Group | Protocol/Port | Health Check Path | Success Codes |
@@ -493,7 +558,7 @@ Create three target groups (Target type: IP, VPC: default, do not register targe
 
 > The UI returns 302 redirects on `/` (to sign-in page), so include 302 and 307 in success codes.
 
-### 8.3 — Listener Rules
+### 9.3 — Listener Rules
 On the HTTP:80 listener (or HTTPS:443 if configured):
 
 | Priority | Condition | Action |
@@ -508,7 +573,7 @@ Add the MCP target group only if you need browser-direct MCP access (usually not
 
 ---
 
-## Step 9: ECS Services
+## Step 10: ECS Services
 
 ### Service Connect Configuration Summary
 
@@ -530,7 +595,7 @@ Add the MCP target group only if you need browser-direct MCP access (usually not
 
 **Phase 1 — Data services (no dependencies):**
 
-### 9.1 — Postgres
+### 10.1 — Postgres
 - Task definition: `prowler-postgres`
 - Desired tasks: 1
 - Service Connect: None — use Service Discovery (Cloud Map DNS)
@@ -540,11 +605,11 @@ Add the MCP target group only if you need browser-direct MCP access (usually not
 - Security group: `prowler-data-sg`
 - Public IP: Enabled
 
-### 9.2 — Valkey
+### 10.2 — Valkey
 - Same pattern as Postgres
 - Service discovery name: `valkey`
 
-### 9.3 — Neo4j
+### 10.3 — Neo4j
 - Same pattern as Postgres
 - Service discovery name: `neo4j`
 
@@ -552,7 +617,7 @@ Add the MCP target group only if you need browser-direct MCP access (usually not
 
 **Phase 2 — API (needs Postgres, Valkey, Neo4j):**
 
-### 9.4 — API
+### 10.4 — API
 - Task definition: `prowler-api`
 - Desired tasks: 1
 - Service Connect: Client and Server
@@ -569,7 +634,7 @@ Add the MCP target group only if you need browser-direct MCP access (usually not
 
 **Phase 3 — Workers, MCP, UI:**
 
-### 9.5 — Worker
+### 10.5 — Worker
 - Task definition: `prowler-worker`
 - Desired tasks: 1
 - Service Connect: Client Side Only
@@ -577,7 +642,7 @@ Add the MCP target group only if you need browser-direct MCP access (usually not
 - Public IP: Enabled
 - No load balancer
 
-### 9.6 — Worker-Beat
+### 10.6 — Worker-Beat
 - Task definition: `prowler-worker-beat`
 - Desired tasks: 1 (never more)
 - Service Connect: Client Side Only
@@ -585,7 +650,7 @@ Add the MCP target group only if you need browser-direct MCP access (usually not
 - Public IP: Enabled
 - No load balancer
 
-### 9.7 — MCP Server
+### 10.7 — MCP Server
 - Task definition: `prowler-mcp`
 - Desired tasks: 1
 - Service Connect: Client and Server
@@ -595,7 +660,7 @@ Add the MCP target group only if you need browser-direct MCP access (usually not
 - Public IP: Enabled
 - Load balancer: `prowler-alb`, target group `prowler-mcp-tg`, container `mcp-server:8000`
 
-### 9.8 — UI
+### 10.8 — UI
 - Task definition: `prowler-ui`
 - Desired tasks: 1
 - Service Connect: Client Side Only
@@ -605,7 +670,7 @@ Add the MCP target group only if you need browser-direct MCP access (usually not
 
 ---
 
-## Step 10: Post-Deployment
+## Step 11: Post-Deployment
 
 ### DNS and HTTPS
 1. Point your domain to the ALB (Route 53 Alias record or CNAME)
@@ -689,6 +754,79 @@ scan from the UI.
 The ALB health check sends the container's private IP as the Host header. Use
 `DJANGO_ALLOWED_HOSTS=*` since the ALB and security groups handle perimeter security.
 
+### Scan reports / downloads fail with "no reports"
+The API and Worker must share an EFS volume mounted at `/tmp/prowler_api_output`. Without
+this, the worker writes reports to ephemeral container storage that the API can't access.
+Verify the mount from inside both containers:
+```
+ls -la /tmp/prowler_api_output
+touch /tmp/prowler_api_output/test && rm /tmp/prowler_api_output/test && echo "OK"
+```
+
+### Manually dispatching a stuck scan
+If a scan is stuck in "queued" and the worker isn't picking it up, purge the Celery queue
+and restart the worker. From the API container:
+```
+/home/prowler/.cache/pypoetry/virtualenvs/prowler-api-NnJNioq7-py3.12/bin/python -c "
+from config.celery import celery_app
+celery_app.control.purge()
+print('Queue purged')
+"
+```
+
+Then get the scan's tenant and provider IDs:
+```
+/home/prowler/.cache/pypoetry/virtualenvs/prowler-api-NnJNioq7-py3.12/bin/python manage.py shell -c "
+from api.models import Scan
+s = Scan.objects.using('admin').get(id='<SCAN_ID>')
+print(f'Tenant: {s.tenant_id}, Provider: {s.provider_id}')
+"
+```
+
+Scale the worker to 0, then back to 1. After it reconnects to Valkey, manually dispatch:
+```
+/home/prowler/.cache/pypoetry/virtualenvs/prowler-api-NnJNioq7-py3.12/bin/python manage.py shell -c "
+from config.celery import celery_app
+celery_app.send_task('scan-perform', kwargs={'tenant_id': '<TENANT_ID>', 'scan_id': '<SCAN_ID>', 'provider_id': '<PROVIDER_ID>'}, queue='scans')
+print('Task sent')
+"
+```
+
+### Check Celery task results for failures
+To see if scan tasks failed silently:
+```
+/home/prowler/.cache/pypoetry/virtualenvs/prowler-api-NnJNioq7-py3.12/bin/python manage.py shell -c "
+from django_celery_results.models import TaskResult
+for t in TaskResult.objects.using('admin').filter(task_name='scan-perform').order_by('-date_done')[:5]:
+    print(f'Task: {t.task_id}, Status: {t.status}, Date: {t.date_done}')
+    if t.result:
+        print(f'  Result: {t.result[:300]}')
+"
+```
+
+### Lighthouse AI 401 Token errors
+Log out and back in after any API restart. If persistent, verify JWT signing keys are
+static (Step 6) and identical across API, Worker, and Worker-Beat task definitions.
+
+### Lighthouse AI tool errors or hallucinations
+Verify `API_BASE_URL` is set on the MCP server task definition. Without it, `prowler_app_*`
+tools call the Prowler SaaS API instead of your self-hosted instance. Model quality also
+affects tool-calling reliability — GPT-5 via OpenAI or OpenRouter is recommended by Prowler
+for best results with Lighthouse AI.
+
+### Integration connection test timeout
+This is usually the worker being busy processing a scan, not a real connection failure.
+A full scan can take 15-30+ minutes, during which connection tests queue up. Check worker
+CloudWatch logs for actual integration execution results rather than relying on the UI
+test button.
+
+### Neo4j fails to start with lock file error
+When Neo4j shuts down uncleanly (ECS stopping a task), a stale lock file remains on EFS.
+The error: `Lock file has been locked by another process: /data/databases/store_lock`.
+Fix by launching a temporary container with the Neo4j EFS volume mounted and deleting
+the lock file, or increase the Neo4j health check `startPeriod` to 120 seconds to allow
+time for the lock to expire.
+
 
 ### Reset User Password
 Use the below command to reset user password from ECS Connect in the api container task.
@@ -702,6 +840,37 @@ Run the below command from the database container task to check if the user exis
 SELECT id, email, name, is_active FROM users;
 ```
 
+
+---
+
+## Production Considerations: Parameters and Secrets
+
+For production deployments, the following values should be stored in AWS Systems Manager
+Parameter Store (for configuration) or AWS Secrets Manager (for sensitive credentials)
+rather than as plaintext environment variables in task definitions. The ECS task execution
+role would need `ssm:GetParameters` or `secretsmanager:GetSecretValue` permissions, and
+task definitions would use `valueFrom` instead of `value`.
+
+| Variable | Service(s) | Type | Recommendation |
+|---|---|---|---|
+| `DJANGO_TOKEN_SIGNING_KEY` | API, Worker, Beat | Secret | Secrets Manager — RSA private key |
+| `DJANGO_TOKEN_VERIFYING_KEY` | API, Worker, Beat | Secret | Secrets Manager — RSA public key |
+| `DJANGO_SECRETS_ENCRYPTION_KEY` | API, Worker, Beat | Secret | Secrets Manager |
+| `AUTH_SECRET` | UI | Secret | Secrets Manager |
+| `POSTGRES_ADMIN_PASSWORD` | API, Worker, Beat | Secret | Secrets Manager |
+| `POSTGRES_PASSWORD` | API, Worker, Beat, Postgres | Secret | Secrets Manager |
+| `NEO4J_PASSWORD` | API, Worker, Beat | Secret | Secrets Manager |
+| `NEO4J_AUTH` | Neo4j | Secret | Secrets Manager (contains `neo4j/<password>`) |
+| `DJANGO_CORS_ALLOWED_ORIGINS` | API | Parameter | Parameter Store |
+| `DJANGO_ALLOWED_HOSTS` | API | Parameter | Parameter Store |
+| `DJANGO_ACCESS_TOKEN_LIFETIME` | API, Worker, Beat | Parameter | Parameter Store |
+| `NEXT_PUBLIC_API_BASE_URL` | UI | Parameter | Baked into image at build time — not runtime configurable |
+| `API_BASE_URL` | MCP | Parameter | Parameter Store |
+| `PROWLER_MCP_SERVER_URL` | UI | Parameter | Parameter Store |
+| `AUTH_URL` | UI | Parameter | Parameter Store |
+
+> Note: `NEXT_PUBLIC_*` variables cannot be managed via Parameter Store because they are
+> inlined at build time. Changing them requires rebuilding the UI image.
 
 ---
 
