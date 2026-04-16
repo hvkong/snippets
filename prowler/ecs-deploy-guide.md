@@ -750,18 +750,6 @@ print(f'Deleted {deleted} empty scans')
 After cleanup, restart the worker service (scale to 0 then back to 1) and trigger a new
 scan from the UI.
 
-### DisallowedHost errors in API logs
-The ALB health check sends the container's private IP as the Host header. Use
-`DJANGO_ALLOWED_HOSTS=*` since the ALB and security groups handle perimeter security.
-
-### Scan reports / downloads fail with "no reports"
-The API and Worker must share an EFS volume mounted at `/tmp/prowler_api_output`. Without
-this, the worker writes reports to ephemeral container storage that the API can't access.
-Verify the mount from inside both containers:
-```
-ls -la /tmp/prowler_api_output
-touch /tmp/prowler_api_output/test && rm /tmp/prowler_api_output/test && echo "OK"
-```
 
 ### Manually dispatching a stuck scan
 If a scan is stuck in "queued" and the worker isn't picking it up, purge the Celery queue
@@ -803,6 +791,21 @@ for t in TaskResult.objects.using('admin').filter(task_name='scan-perform').orde
         print(f'  Result: {t.result[:300]}')
 "
 ```
+
+### DisallowedHost errors in API logs
+The ALB health check sends the container's private IP as the Host header. Use
+`DJANGO_ALLOWED_HOSTS=*` since the ALB and security groups handle perimeter security.
+
+### Scan reports / downloads fail with "no reports"
+The API and Worker must share an EFS volume mounted at `/tmp/prowler_api_output`. Without
+this, the worker writes reports to ephemeral container storage that the API can't access.
+Verify the mount from inside both containers:
+```
+ls -la /tmp/prowler_api_output
+touch /tmp/prowler_api_output/test && rm /tmp/prowler_api_output/test && echo "OK"
+```
+
+
 
 ### Lighthouse AI 401 Token errors
 Log out and back in after any API restart. If persistent, verify JWT signing keys are
@@ -921,14 +924,16 @@ Tenant
         └── AttackPathsScan (graph analysis)
 ```
 
+
+
 Note: There is no API to delete a scan. The Scans API only allows GET, POST, and PATCH.
 
 All findings link back to a scan via ForeignKey(Scan, on_delete=CASCADE), meaning if you delete a scan at the database level, all its findings and related summaries cascade-delete automatically.
 
 Provider is the other key primitive. Deleting a provider cascades to all its scans, which cascades to all findings. The codebase uses soft-delete for providers (is_deleted flag) rather than hard delete, and there's a provider-deletion Celery task that handles cleanup.
 
+
+
 ---
-
-
 
 Enjoy! Prowler is AWS-some
