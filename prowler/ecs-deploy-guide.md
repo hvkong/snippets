@@ -900,4 +900,35 @@ To restart, bring up services in order: data services → API → workers/MCP/UI
 The ALB costs ~$16/month even with no targets. Delete it if the environment will be
 unused for extended periods.
 
+---
+
+## Data Hierarchy for Scans
+
+```
+Tenant
+  └── Provider (the cloud account)
+        ├── Scan (a scan execution against this provider)
+        │     ├── Finding (individual security findings, CASCADE on scan delete)
+        │     ├── ScanSummary (aggregated stats, CASCADE)
+        │     ├── ComplianceOverview (CASCADE)
+        │     ├── ComplianceRequirementOverview (CASCADE)
+        │     ├── ComplianceOverviewSummary (CASCADE)
+        │     ├── DailySeveritySummary (CASCADE)
+        │     ├── ScanCategorySummary (CASCADE)
+        │     └── ScanGroupSummary (CASCADE)
+        ├── Resource (discovered cloud resources)
+        ├── ProviderSecret (credentials)
+        └── AttackPathsScan (graph analysis)
+```
+
+Note: There is no API to delete a scan. The Scans API only allows GET, POST, and PATCH.
+
+All findings link back to a scan via ForeignKey(Scan, on_delete=CASCADE), meaning if you delete a scan at the database level, all its findings and related summaries cascade-delete automatically.
+
+Provider is the other key primitive. Deleting a provider cascades to all its scans, which cascades to all findings. The codebase uses soft-delete for providers (is_deleted flag) rather than hard delete, and there's a provider-deletion Celery task that handles cleanup.
+
+---
+
+
+
 Enjoy! Prowler is AWS-some
