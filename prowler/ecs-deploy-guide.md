@@ -42,7 +42,7 @@ runtime. This is standard Next.js behavior, not a Prowler bug.
 The hostname `prowler-api` works in docker-compose because Docker Compose creates a network
 where bare service names resolve automatically (the API service has `hostname: "prowler-api"`
 in docker-compose.yml). In ECS with Service Connect, hostnames require the namespace suffix
-(e.g., `prowler-api.prowler`). Bare names like `prowler-api` do not resolve.
+(e.g. `prowler-api.prowler`). Bare names like `prowler-api` do not resolve.
 
 This is a known issue: https://github.com/prowler-cloud/prowler/issues/8211
 
@@ -117,7 +117,7 @@ the Envoy HTTP proxy interfering with non-HTTP protocols.
 
 The Celery worker and beat scheduler communicate through Valkey as a message broker. Beat
 publishes scheduled tasks to Valkey queues. Workers consume tasks from those queues. The API
-also publishes tasks (e.g., when a user triggers a scan) to Valkey for workers to pick up.
+also publishes tasks (e.g. when a user triggers a scan) to Valkey for workers to pick up.
 
 **Summary of hostname resolution methods:**
 
@@ -684,6 +684,55 @@ definition matches your domain exactly (including `https://`).
 ### First Login
 Navigate to `https://<your-domain>` and sign up with email and password.
 There is no default admin account — the first user you create becomes the tenant owner.
+
+### SAML SSO Setup
+
+To enable SAML SSO (e.g. with Microsoft Entra ID / Azure AD):
+
+**Step 1: Add the required environment variable to the API task definition:**
+- `SAML_SSO_CALLBACK_URL` = `https://<your-domain>/api/auth/callback/saml`
+
+This is where the API redirects the browser after processing the SAML assertion. Without
+this variable, the SAML flow returns a 500 error.
+
+**Step 2: Configure your Identity Provider (IdP):**
+
+In your IdP's SAML app configuration, set:
+- **ACS URL** (Assertion Consumer Service): `https://<your-domain>/api/v1/accounts/saml/<email-domain>/acs/`
+- **Entity ID** (also called Audience URI or SP Entity ID): `urn:prowler.com:sp`
+  - Note: terminology varies by IdP. Azure calls this "Identifier (Entity ID)".
+
+> The Prowler UI displays the ACS URL using the internal hostname baked into the image
+> (e.g. `http://prowler-api.prowler:8080/api/v1/accounts/saml/.../acs/`). This is
+> cosmetic and incorrect for non-docker-compose deployments. Manually enter the correct
+> public URL in your IdP instead of copying the one shown in the UI. The `NEXT_PUBLIC_API_BASE_URL`
+> environment variable does not affect this — it is baked into the image at build time.
+
+**Step 3: Upload IdP metadata XML in Prowler:**
+
+In the Prowler UI, go to **Configuration → SAML SSO**, enter your email domain, and
+upload the SAML metadata XML from your IdP.
+
+**Step 4: Configure role mapping (important):**
+
+Prowler uses the `userType` SAML attribute to assign roles on each login. If the
+`userType` attribute is not included in the SAML assertion, Prowler creates a default
+role with no permissions and assigns it to the user on every login — even if an admin
+previously assigned a different role manually. This means manual role assignments are
+overwritten on each SAML login when `userType` is absent.
+
+To prevent this, configure your IdP to send a `userType` attribute with a value matching
+a role name that exists in Prowler (e.g. `admin`). In Azure AD, this can be done using
+App Roles:
+1. Create an App Role in the app registration with a value matching the Prowler role name
+2. Assign users/groups to the App Role in Enterprise Applications
+3. Add a SAML claim: name `userType`, source attribute `user.assignedroles`
+
+**Step 5: Supported SAML assertion attributes:**
+- `firstName` — user's first name
+- `lastName` — user's last name
+- `userType` — maps to a Prowler role name (creates the role if it doesn't exist)
+- `organization` — company/organization name
 
 ---
 
