@@ -80,8 +80,11 @@
             <div><h1>Prowler Security Dashboard</h1><div class="subtitle">Cloud Security Posture Overview</div></div>
         </div>
         <div style="display:flex;align-items:center;gap:0.75rem;">
-            <select id="providerFilter" onchange="renderDashboard()" style="background:#292524;color:#F5F5F4;border:1px solid #44403c;border-radius:0.375rem;padding:0.4rem 0.75rem;font-size:0.8rem;cursor:pointer;">
+            <select id="providerFilter" onchange="updateAccountFilter();renderDashboard()" style="background:#292524;color:#F5F5F4;border:1px solid #44403c;border-radius:0.375rem;padding:0.4rem 0.75rem;font-size:0.8rem;cursor:pointer;">
                 <option value="all">All Providers</option>
+            </select>
+            <select id="accountFilter" onchange="renderDashboard()" style="background:#292524;color:#F5F5F4;border:1px solid #44403c;border-radius:0.375rem;padding:0.4rem 0.75rem;font-size:0.8rem;cursor:pointer;">
+                <option value="all">All Accounts</option>
             </select>
             <button class="theme-toggle" onclick="toggleTheme()"><span id="themeIcon">🌙</span> <span id="themeLabel">Dark</span></button>
         </div>
@@ -116,6 +119,14 @@ function toggleTheme() {
 const COLORS = { pass:'#1FB53F', fail:'#A3231F', manual:'#636c78', info:'#2684FF', critical:'#951649', high:'#e11d48', medium:'#ee6f15', low:'#fcf45d', informational:'#3274d9', mutedFail:'#fca903', mutedPass:'#03fccf' };
 let allData = [];
 
+function updateAccountFilter() {
+    const provFilter=document.getElementById('providerFilter').value;
+    const accFilter=document.getElementById('accountFilter');
+    const filtered=provFilter==='all'?allData:allData.filter(r=>(r.PROVIDER||'').toLowerCase()===provFilter);
+    const accounts=[...new Set(filtered.map(r=>r.ACCOUNT_UID||r.ACCOUNT_ID||r.SUBSCRIPTION||'').filter(Boolean))];
+    accFilter.innerHTML='<option value="all">All Accounts</option>'+accounts.map(a=>`<option value="${a}">${a}</option>`).join('');
+}
+
 // ============================================================
 // FILE LOADING
 // ============================================================
@@ -127,7 +138,7 @@ document.getElementById('csvFiles').addEventListener('change', function(e) {
     allData = []; let loaded = 0;
     files.forEach(file => {
         Papa.parse(file, { header:true, delimiter:';', skipEmptyLines:true,
-            complete(r){ if(r.data.length>1&&r.data[0].CHECK_ID) allData=allData.concat(r.data); loaded++; if(loaded===files.length){document.getElementById('fileCount').textContent=`${files.length} file(s) — ${allData.length.toLocaleString()} findings`;renderDashboard();}},
+            complete(r){ if(r.data.length>1&&r.data[0].CHECK_ID) allData=allData.concat(r.data); loaded++; if(loaded===files.length){document.getElementById('fileCount').textContent=`${files.length} file(s) — ${allData.length.toLocaleString()} findings`;updateAccountFilter();renderDashboard();}},
             error(){ loaded++; }
         });
     });
@@ -145,8 +156,12 @@ function renderDashboard() {
     const currentFilter=filterEl.value;
     filterEl.innerHTML='<option value="all">All Providers</option>'+allProviders.map(p=>`<option value="${p}" ${currentFilter===p?'selected':''}>${p.toUpperCase()}</option>`).join('');
 
-    // Apply filter
-    const filteredRaw=currentFilter==='all'?allData:allData.filter(r=>(r.PROVIDER||'').toLowerCase()===currentFilter);
+    // Apply provider filter
+    let filteredRaw=currentFilter==='all'?allData:allData.filter(r=>(r.PROVIDER||'').toLowerCase()===currentFilter);
+
+    // Apply account filter
+    const accFilter=document.getElementById('accountFilter').value;
+    if(accFilter!=='all') filteredRaw=filteredRaw.filter(r=>(r.ACCOUNT_UID||r.ACCOUNT_ID||r.SUBSCRIPTION||'')===accFilter);
 
     const data = filteredRaw.map(row=>({...row,
         STATUS:(row.MUTED==='True'&&row.STATUS==='FAIL')?'MUTED (FAIL)':(row.MUTED==='True'&&row.STATUS==='PASS')?'MUTED (PASS)':row.STATUS,
