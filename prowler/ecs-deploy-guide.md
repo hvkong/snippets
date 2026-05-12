@@ -770,6 +770,54 @@ The Next.js standalone server binds to the container hostname by default, not `0
 The custom image's Dockerfile sets `ENV HOSTNAME="0.0.0.0"` which fixes this. If using the
 published image, add `HOSTNAME=0.0.0.0` as an environment variable.
 
+### Scans stuck at a percentage (executing but not progressing)
+
+Scans may show as "executing" at a fixed percentage (e.g., 6%, 9%, 94%) indefinitely.
+This happens when the worker process dies mid-scan — typically due to ECS killing the
+task during a rolling deployment, OOM, or token expiry. The scan record remains in
+`executing` state because no process is alive to update it.
+
+**Step 1: Identify stuck executing scans:**
+```
+/home/prowler/.cache/pypoetry/virtualenvs/*/bin/python manage.py shell -c "
+from api.models import Scan
+for s in Scan.objects.using('admin').filter(state='executing'):
+    print(f'ID: {s.id}, Name: {s.name}, Provider: {s.provider_id}, Progress: {s.progress}, Started: {s.started_at}')
+"
+```
+
+If the scan has been at the same percentage for more than 30 minutes with no worker log
+activity, it's stuck.
+
+**Step 2: Mark stuck scans as failed:**
+```
+/home/prowler/.cache/pypoetry/virtualenvs/*/bin/python manage.py shell -c "
+from api.models import Scan
+for s in Scan.objects.using('admin').filter(state='executing'):
+    s.state = 'failed'
+    s.save(using='admin')
+    print(f'Marked {s.id} ({s.name}) as failed')
+"
+```
+
+Findings collected up to the stuck percentage are preserved in the database and visible
+in the UI. Only the remaining checks weren't executed.
+
+**Step 3: Trigger a new scan from the UI for the affected provider(s).**
+
+The scheduled periodic tasks (if configured) are not affected — they will fire at their
+next scheduled time and create new scan records automatically.
+
+**Common causes and prevention:**
+- **ECS rolling deployment killed the worker:** Never update the worker service (scale,
+  force deploy, new task definition) while scans are executing. Check the UI first.
+- **OOM kill (exit code 137):** Increase worker task memory to 4 GB or higher for large
+  AWS accounts.
+- **Token expiry:** Ensure `DJANGO_ACCESS_TOKEN_LIFETIME` is set to at least `180`
+  (3 hours) on API, Worker, and Worker-Beat.
+- **Stagger scheduled scans:** If multiple providers scan simultaneously, they compete
+  for worker processes. Schedule them 30 minutes apart.
+
 ### Scans stuck in "queued" state
 Scans may appear as "queued" in the UI but never execute. This happens when the worker
 receives the Celery task but crashes or restarts before the scan begins. The scan record
