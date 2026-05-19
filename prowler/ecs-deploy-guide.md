@@ -1023,13 +1023,50 @@ time for the lock to expire.
 Use the below command to reset user password from ECS Connect in the api container task.
 ```
 /home/prowler/.cache/pypoetry/virtualenvs/prowler-api-NnJNioq7-py3.12/bin/python manage.py shell -c "from api.models import User; u = User.objects.using('admin').get(email='<user_email_address>'); u.set_password('NewPassword123!'); u.save(using='admin'); print('Done')"
-
 ```
-Run the below command from the database container task to check if the user exists in the database.
 
+Run the below command from the database container task to check if the user exists in the database.
 ```
 SELECT id, email, name, is_active FROM users;
 ```
+
+### Delete a User
+
+The Prowler UI only allows users to delete themselves ("Only the current user can be
+deleted"). Admins cannot delete other users through the UI or API. Use the database
+directly from the API container.
+
+List all users:
+```
+/home/prowler/.cache/pypoetry/virtualenvs/prowler-api-NnJNioq7-py3.12/bin/python manage.py shell -c "
+from api.models import User
+for u in User.objects.using('admin').all():
+    print(f'{u.email} - {u.id}')
+"
+```
+
+Before deleting, verify the user isn't the sole member of a tenant:
+```
+/home/prowler/.cache/pypoetry/virtualenvs/prowler-api-NnJNioq7-py3.12/bin/python manage.py shell -c "
+from api.models import User, Membership
+u = User.objects.using('admin').get(email='<user-email>')
+for m in Membership.objects.using('admin').filter(user=u):
+    others = Membership.objects.using('admin').filter(tenant=m.tenant).exclude(user=u).count()
+    print(f'Tenant: {m.tenant_id} — Other members: {others}')
+"
+```
+
+If other members exist (Other members > 0), safe to delete:
+```
+/home/prowler/.cache/pypoetry/virtualenvs/prowler-api-NnJNioq7-py3.12/bin/python manage.py shell -c "
+from api.models import User
+User.objects.using('admin').filter(email='<user-email>').delete()
+print('Done')
+"
+```
+
+> Warning: If the user is the sole member of a tenant (Other members: 0), deleting them
+> orphans the tenant. The tenant will exist in the database but no one can access it.
 
 
 ---
